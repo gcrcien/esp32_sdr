@@ -7,11 +7,27 @@
 
 // ====== COLORES CONFIGURABLES PARA FFT ======
 #ifndef FFT_BG_COLOR
-#define FFT_BG_COLOR   (0, 0, 8)     // fondo de la zona FFT
+#define FFT_BG_COLOR   (0, 0, 8)     // fondo de la zona FFT (azul muy oscuro)
 #endif
 
 #ifndef FFT_BAR_COLOR
-#define FFT_BAR_COLOR  0x3646
+#define FFT_BAR_COLOR  0x3646        // barras de la FFT
+#endif
+
+// banda de recepción (span) más clara sobre la FFT
+#ifndef FFT_SPAN_COLOR
+#define FFT_SPAN_COLOR 0x39E7        // gris/azul un poco más claro que FFT_BG_COLOR
+#endif
+
+// ancho típico (Hz) del filtro de demod para dibujar el span (ajusta a tu gusto)
+#ifndef UI_SPAN_SSB_HZ
+#define UI_SPAN_SSB_HZ   2500.0f
+#endif
+#ifndef UI_SPAN_AM_HZ
+#define UI_SPAN_AM_HZ    5000.0f
+#endif
+#ifndef UI_SPAN_CW_HZ
+#define UI_SPAN_CW_HZ     500.0f
 #endif
 
 // ====== primero: defines que usa Layout.h ======
@@ -54,6 +70,115 @@ static inline float ui_mag_to_norm_log(double mag)
 
   // mapear [floor, top] -> [0,1]
   return (dB - floor) / (top - floor);
+}
+
+// ====== helpers para span de demod sobre la FFT ======
+// Devuelve el rango en Hz alrededor de 0 que queremos resaltar
+inline void ui_getDemodSpanHz(float &fStart, float &fEnd)
+{
+  float bw;
+
+  switch (g_demodMode) {
+    case DEMOD_AM:
+      bw     = UI_SPAN_AM_HZ;
+      fStart = -bw;
+      fEnd   = +bw;
+      break;
+
+    case DEMOD_LSB:
+      bw     = UI_SPAN_SSB_HZ;
+      // LSB: de -BW a 0 Hz
+      fStart = -bw;
+      fEnd   = 0.0f;
+      break;
+
+    case DEMOD_USB:
+      bw     = UI_SPAN_SSB_HZ;
+      // USB: de 0 a +BW
+      fStart = 0.0f;
+      fEnd   = +bw;
+      break;
+
+    case DEMOD_CW:
+      bw     = UI_SPAN_CW_HZ;
+      // CW más estrecho y centrado
+      fStart = -bw * 0.5f;
+      fEnd   = +bw * 0.5f;
+      break;
+
+    default:
+      // por defecto algo tipo SSB simétrico
+      bw     = UI_SPAN_SSB_HZ;
+      fStart = -bw;
+      fEnd   = +bw;
+      break;
+  }
+}
+
+// Estos se actualizan en píxeles (0..bins_to_draw-1) a partir del span en Hz
+static int      g_fftSpanLeft        = 0;
+static int      g_fftSpanRight       = 0;
+static uint32_t g_fftSpanFsLast      = 0;
+static uint8_t  g_fftSpanDemodLast   = 255;
+
+inline void ui_updateFFTSpan(int bins_to_draw)
+{
+  if (bins_to_draw <= 0) return;
+
+  // evitar divisiones si el muestreo es inválido
+  if (g_samplingHz == 0) {
+    g_fftSpanLeft  = 0;
+    g_fftSpanRight = bins_to_draw - 1;
+    return;
+  }
+
+  // solo recalcular si cambió Fs o el modo
+  if (g_fftSpanFsLast == g_samplingHz &&
+      g_fftSpanDemodLast == g_demodMode) {
+    return;
+  }
+
+  g_fftSpanFsLast    = g_samplingHz;
+  g_fftSpanDemodLast = g_demodMode;
+
+  float fs     = (float)g_samplingHz;
+  float halfFs = fs * 0.5f;
+
+  float fStart, fEnd;
+  ui_getDemodSpanHz(fStart, fEnd);
+
+  // Limitar a [-Fs/2, +Fs/2]
+  if (fStart < -halfFs) fStart = -halfFs;
+  if (fEnd   > +halfFs) fEnd   = +halfFs;
+  if (fEnd < fStart) {
+    float tmp = fStart;
+    fStart = fEnd;
+    fEnd   = tmp;
+  }
+
+  float normL = (fStart + halfFs) / fs;   // 0..1
+  float normR = (fEnd   + halfFs) / fs;   // 0..1
+
+  if (normL < 0.0f) normL = 0.0f;
+  if (normL > 1.0f) normL = 1.0f;
+  if (normR < 0.0f) normR = 0.0f;
+  if (normR > 1.0f) normR = 1.0f;
+
+  g_fftSpanLeft  = (int)(normL * (float)(bins_to_draw - 1) + 0.5f);
+  g_fftSpanRight = (int)(normR * (float)(bins_to_draw - 1) + 0.5f);
+
+  if (g_fftSpanLeft < 0) g_fftSpanLeft = 0;
+  if (g_fftSpanRight >= bins_to_draw) g_fftSpanRight = bins_to_draw - 1;
+  if (g_fftSpanRight < g_fftSpanLeft) g_fftSpanRight = g_fftSpanLeft;
+}
+
+// color de fondo correspondiente a cada bin (dentro/fuera del span)
+inline uint16_t ui_getFFTBgColorForBin(int binIndex)
+{
+  if (binIndex >= g_fftSpanLeft && binIndex <= g_fftSpanRight) {
+    return FFT_SPAN_COLOR;
+  }
+  return FFT_BG_COLOR;
 }
 
 
@@ -293,8 +418,12 @@ inline void ui_drawTopDynamic()
   if (fabs(g_iqGain  - prev_iqGain)  > 0.005) need = true;
   if (fabs(g_iqPhase - prev_iqPhase) > 0.005) need = true;
   if (g_samplingHz  != prev_fs)     need = true;
-  // 🔴 ESTA FALTABA:
-  if (g_demodMode   != prev_demod)  need = true;
+  if (g_demodMode   != prev_demod)  {
+    need = true;
+    // al cambiar de modo, forzamos a recalcular la FFT y su fondo/span
+    g_resetFFTHeights = true;
+    g_fftBgDrawn      = false;
+  }
 
   if (!need) {
     return;
@@ -464,10 +593,13 @@ inline void ui_drawFFTLine()
 {
   int x = 0;
   int y = g_fft_y_bottom - g_fft_height;
-  int w = 480;           // o DRAW_WIDTH
+  int w = ui_min(DRAW_WIDTH, (int)tft.width());
   int h = g_fft_height;
 
   const int bins_to_draw = ui_min(DRAW_WIDTH, (int)tft.width());
+
+  // actualizar el span de recepción según modo/Fs
+  ui_updateFFTSpan(bins_to_draw);
 
   // buffers estáticos
   static float    fftSmooth[DRAW_WIDTH] = {0};
@@ -481,17 +613,24 @@ inline void ui_drawFFTLine()
   if (g_resetFFTHeights || lastRef != g_refMag) {
     memset(prevHeights, 0, sizeof(prevHeights));
     memset(fftSmooth, 0, sizeof(fftSmooth));
-    fftSmoothInit   = false;
+    fftSmoothInit     = false;
     g_resetFFTHeights = false;
-    lastRef         = g_refMag;
-    g_fftBgDrawn    = false;   // forzamos a que pinte el rectángulo en este frame
+    lastRef           = g_refMag;
+    g_fftBgDrawn      = false;   // forzamos a que pinte el rectángulo en este frame
   }
 
   // pinta el fondo SOLO si no está pintado
   if (!g_fftBgDrawn) {
+    // fondo general
     tft.fillRect(x, y, w, h, FFT_BG_COLOR);
+    // banda de recepción más clara
+    if (g_fftSpanRight > g_fftSpanLeft) {
+      int spanW = g_fftSpanRight - g_fftSpanLeft + 1;
+      tft.fillRect(g_fftSpanLeft, y, spanW, h, FFT_SPAN_COLOR);
+    }
     g_fftBgDrawn = true;
   }
+
   static int rawHeights[DRAW_WIDTH];
   for (int i = 0; i < bins_to_draw; i++) {
     // ahora usamos escala log relativa a g_refMag
@@ -530,8 +669,9 @@ inline void ui_drawFFTLine()
       // dibuja solo la parte nueva en verde
       tft.drawFastVLine(i, g_fft_y_bottom - targetH, targetH - prevHeight, FFT_BAR_COLOR);
     } else if (targetH < prevHeight) {
-      // “borra” con el color de fondo de la FFT
-      tft.drawFastVLine(i, g_fft_y_bottom - prevHeight, prevHeight - targetH, FFT_BG_COLOR);
+      // “borra” con el color de fondo de la FFT, respetando el span
+      uint16_t bgCol = ui_getFFTBgColorForBin(i);
+      tft.drawFastVLine(i, g_fft_y_bottom - prevHeight, prevHeight - targetH, bgCol);
     }
     prevHeights[i] = targetH;
   }
@@ -572,12 +712,12 @@ inline void ui_drawWaterfallLine()
 
     // === suavizado temporal muy ligero ===
     // 3 partes del valor nuevo + 1 parte del valor anterior
-uint8_t prev    = g_wfPrevLine[x];
-uint8_t smooth  = (uint8_t)(
-    ((uint16_t)gammaVal * WF_SMOOTH_NEW + (uint16_t)prev * WF_SMOOTH_OLD)
-    / (WF_SMOOTH_NEW + WF_SMOOTH_OLD)
-);
-g_wfPrevLine[x] = smooth;
+    uint8_t prev    = g_wfPrevLine[x];
+    uint8_t smooth  = (uint8_t)(
+        ((uint16_t)gammaVal * WF_SMOOTH_NEW + (uint16_t)prev * WF_SMOOTH_OLD)
+        / (WF_SMOOTH_NEW + WF_SMOOTH_OLD)
+    );
+    g_wfPrevLine[x] = smooth;
 
 
     uint16_t c       = ui_intensityToColor(smooth);

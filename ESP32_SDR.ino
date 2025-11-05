@@ -13,11 +13,12 @@ volatile bool g_samplingChanged = false;
 
 #include "I2S_Capture.h"    // versión con doble buffer y frame counter
 
+
 // 👇👇👇  WRAPPER para el encoder (lo estaba pidiendo)
 // Encoder.h llama a sdr_set_sampling(hz), así que lo definimos aquí.
 void sdr_set_sampling(uint32_t hz)
 {
-  // RX (PCM1808)
+  // RX (PCM1808) sigue usando Fs variable (span)
   i2s_set_clk(
       I2S_PORT,
       hz,
@@ -26,19 +27,23 @@ void sdr_set_sampling(uint32_t hz)
   );
 
 #if AUDIO_PASSTHROUGH
-  // TX (PT8211) – mantenemos misma Fs que el ADC
+  // TX (PT8211) SIEMPRE a Fs fija de audio (24 kHz)
   i2s_set_clk(
       I2S_TX_PORT,
-      hz,
+      AUDIO_FS_HZ,
       I2S_BITS_PER_SAMPLE_16BIT,
       I2S_CHANNEL_STEREO
   );
 #endif
 
-  // actualizar globales
+  // actualizar globales (Fs ADC)
   g_samplingHz      = hz;
   g_samplingChanged = true;
+
+  // filtros SIEMPRE diseñados para AUDIO_FS_HZ (24 kHz)
+  audio_filters_init((float)AUDIO_FS_HZ);
 }
+
 
 
 

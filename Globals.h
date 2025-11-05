@@ -95,6 +95,7 @@ enum DemodMode : uint8_t {
   DEMOD_LSB,
   DEMOD_USB,
   DEMOD_DSB,
+  DEMOD_CW,
   DEMOD_COUNT
 };
 

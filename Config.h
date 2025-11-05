@@ -62,7 +62,7 @@
 #define I2S_TX_BCK_PIN   13   // gpio13 > bck
 #define I2S_TX_WS_PIN    12   // gpio12 > ws
 #define I2S_TX_DATA_PIN  5    // gpio5  > din
-
+#define AUDIO_FS_HZ          24000U   // Fs fija para DAC y filtros de audio
 // ================== EEPROM ==================
 #define EEPROM_BYTES           64
 #define EE_MAGIC_ADDR          0

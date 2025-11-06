@@ -21,7 +21,7 @@
 
 // ancho típico (Hz) del filtro de demod para dibujar el span (ajusta a tu gusto)
 #ifndef UI_SPAN_SSB_HZ
-#define UI_SPAN_SSB_HZ   2500.0f
+#define UI_SPAN_SSB_HZ   2800.0f
 #endif
 #ifndef UI_SPAN_AM_HZ
 #define UI_SPAN_AM_HZ    5000.0f
@@ -39,8 +39,8 @@
 #define BANDBAR_Y       (TOPBAR_LINE_Y + 1)
 #endif
 // Suavizado del waterfall
-#define WF_SMOOTH_NEW   2   // peso del valor nuevo
-#define WF_SMOOTH_OLD   1   // peso del valor anterior
+#define WF_SMOOTH_NEW   1   // peso del valor nuevo
+#define WF_SMOOTH_OLD   2    // peso del valor anterior
 
 
 // -------- helpers locales (Layout.h también los usa) --------

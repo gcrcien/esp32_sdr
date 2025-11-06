@@ -37,7 +37,7 @@ enum : uint8_t {
 // Targets ajustables:
 
 // AM / DSB → Low-pass de audio (voz AM)
-#define FILT_AM_FC_HZ      2800.0f   // antes 3000.0f
+#define FILT_AM_FC_HZ      4800.0f   // antes 3000.0f
 #define FILT_AM_Q          0.707f    // butterworth aprox
 
 // SSB (USB/LSB) → ventana voz 300–2600 Hz aprox (HP + LP)
@@ -45,9 +45,9 @@ enum : uint8_t {
 //   FILT_SSB_HP_HZ: 200–400 Hz
 //   FILT_SSB_LP_HZ: 2200–3200 Hz
 #define FILT_SSB_HP_HZ      350.0f
-#define FILT_SSB_LP_HZ     2600.0f
-#define FILT_SSB_HP_Q       0.707f   // típico 0.5–1.0
-#define FILT_SSB_LP_Q       0.707f   // típico 0.5–1.0
+#define FILT_SSB_LP_HZ     2800.0f
+#define FILT_SSB_HP_Q       0.907f   // típico 0.5–1.0
+#define FILT_SSB_LP_Q       0.907f   // típico 0.5–1.0
 
 // CW → Band-pass estrecho alrededor del tono CW
 #define FILT_CW_FC_HZ       700.0f   // tono CW ~700 Hz
@@ -260,7 +260,7 @@ static float s_noise_env   = 0.0f;
 static float s_sig_env     = 0.0f;  // envolvente “rápida” de la señal
 
 // Coeficientes "globales" del post-filtro / denoise
-#define AUDIO_GAIN    1.0f     // Ganancia global de audio (lineal)
+#define AUDIO_GAIN    1.7f     // Ganancia global de audio (lineal)
 
 // Inicializar filtros de audio según Fs actual (Fs AUDIO)
 inline void audio_filters_init(float fs)
@@ -308,7 +308,7 @@ inline void iq_antialias_init(float fs_adc)
 #define DENOISE_DC_ALPHA        0.0035f   // rango típico: 0.0005f – 0.005f
 
 // Envolvente rápida de señal (qué tan rápido detecta voz/picos)
-#define DENOISE_SIG_ALPHA       0.20f     // rango típico: 0.05f – 0.30f
+#define DENOISE_SIG_ALPHA       0.26f     // rango típico: 0.05f – 0.30f
 
 // Seguimiento del piso de ruido (baja = se adapta rápido cuando el ruido disminuye)
 #define DENOISE_NOISE_ALPHA_DOWN 0.040f   // rango típico: 0.002f – 0.050f
@@ -316,9 +316,9 @@ inline void iq_antialias_init(float fs_adc)
 #define DENOISE_NOISE_ALPHA_UP   0.0255f  // rango típico: 0.0005f – 0.010f
 
 // Umbral del gate en múltiplos del piso de ruido
-#define DENOISE_GATE_MULT       5.0f      // rango típico: 2.0f – 4.0f
+#define DENOISE_GATE_MULT       3.5f      // rango típico: 2.0f – 4.0f
 // Atenuación máxima dentro del gate (0.1 = muy agresivo, 0.4 = suave)
-#define DENOISE_GATE_GAIN       0.025f    // rango típico: 0.10f – 0.40f
+#define DENOISE_GATE_GAIN       0.038f    // rango típico: 0.10f – 0.40f
 
 // Suavizado final (low-pass sobre la salida): más alto = más apagado
 // A Fs=24k, alpha=0.40 da una fc ~2kHz–3kHz aprox → menos hiss alto.
@@ -381,7 +381,7 @@ inline float dsp_process_sample(float i_norm, float q_norm)
   float audio = 0.0f;
 
   switch (g_demodMode) {
-    case DMOD_AM: {
+    case DMOD_AM: {/*
         // Demod AM: envolvente de la señal analítica
         float mag = sqrtf(i_norm * i_norm + q_norm * q_norm);
 
@@ -392,7 +392,17 @@ inline float dsp_process_sample(float i_norm, float q_norm)
         float a = mag - s_env_am_dc;         // audio AM sin DC
         a = biquad_process(s_filt_am, a);    // LP AM
 
-        audio = a;
+        audio = a;*/
+
+        
+    // Envolvente de la señal analítica
+    float mag = sqrtf(i_norm * i_norm + q_norm * q_norm);
+
+    // Opción A: sin DC extra aquí, solo LP de audio
+    float a = biquad_process(s_filt_am, mag);   // AM baseband filtrado
+
+    audio = a;
+        
         break;
       }
 

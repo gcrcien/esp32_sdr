@@ -44,7 +44,7 @@ enum : uint8_t {
 // puedes jugar con estos rangos:
 //   FILT_SSB_HP_HZ: 200–400 Hz
 //   FILT_SSB_LP_HZ: 2200–3200 Hz
-#define FILT_SSB_HP_HZ      280.0f
+#define FILT_SSB_HP_HZ      350.0f
 #define FILT_SSB_LP_HZ     2600.0f
 #define FILT_SSB_HP_Q       0.707f   // típico 0.5–1.0
 #define FILT_SSB_LP_Q       0.707f   // típico 0.5–1.0
@@ -241,6 +241,10 @@ static Biquad s_filt_ssb_Q_lp;   // LP Q
 
 static Biquad s_filt_cw;
 
+// DC-blocker adicional específico para SSB (para matar el tono cercano a 0 Hz)
+static float s_ssb_dc = 0.05f;//Filtro DC-F-bajas
+#define SSB_DC_ALPHA 0.07f   // rango típico: 0.01–0.05
+
 // Post-filtro global + estimador de ruido
 static float s_env_dc      = 0.0f;  // DC del audio (post-filtro)
 static float s_env_am_dc   = 0.0f;  // DC de la envolvente AM
@@ -249,9 +253,6 @@ static float s_noise_env   = 0.0f;
 static float s_sig_env     = 0.0f;  // envolvente “rápida” de la señal
 
 // Coeficientes "globales" del post-filtro / denoise
-//#define LP_ALPHA      0.08f    // Low-pass 1er orden global (NO usar aquí)
-//#define NOISE_ALPHA   0.0008f  // Velocidad de estimador de ruido
-//#define NOISE_GATE_K  2.0f     // Umbral del gate
 #define AUDIO_GAIN    1.0f     // Ganancia global de audio (lineal)
 
 // Inicializar filtros de audio según Fs actual
@@ -281,6 +282,7 @@ inline void audio_filters_init(float fs)
   s_lp_y        = 0.0f;
   s_noise_env   = 0.0f;
   s_sig_env     = 0.0f;
+  s_ssb_dc      = 0.0f;     // 🔹 reset del DC-blocker SSB
 
   hilbert45_init();
 }
@@ -302,7 +304,7 @@ inline void audio_filters_init(float fs)
 // Umbral del gate en múltiplos del piso de ruido
 #define DENOISE_GATE_MULT       5.0f      // rango típico: 2.0f – 4.0f
 // Atenuación máxima dentro del gate (0.1 = muy agresivo, 0.4 = suave)
-#define DENOISE_GATE_GAIN       0.025f     // rango típico: 0.10f – 0.40f
+#define DENOISE_GATE_GAIN       0.025f    // rango típico: 0.10f – 0.40f
 
 // Suavizado final (low-pass sobre la salida): más alto = más apagado
 // A Fs=24k, alpha=0.40 da una fc ~2kHz–3kHz aprox → menos hiss alto.
@@ -384,11 +386,11 @@ inline float dsp_process_sample(float i_norm, float q_norm)
     case DMOD_LSB: {
         // ===== SSB por método de phasing usando ±45° =====
         // 1) ventana de voz por rama I y Q: HP seguido de LP
-        float i_bp = biquad_process(s_filt_ssb_I, i_norm);      // HP
-        i_bp       = biquad_process(s_filt_ssb_I_lp, i_bp);     // LP
+        float i_bp = biquad_process(s_filt_ssb_I,    i_norm);      // HP
+        i_bp       = biquad_process(s_filt_ssb_I_lp, i_bp);        // LP
 
-        float q_bp = biquad_process(s_filt_ssb_Q, q_norm);      // HP
-        q_bp       = biquad_process(s_filt_ssb_Q_lp, q_bp);     // LP
+        float q_bp = biquad_process(s_filt_ssb_Q,    q_norm);      // HP
+        q_bp       = biquad_process(s_filt_ssb_Q_lp, q_bp);        // LP
 
         // 2) redes de fase ±45° por rama (mismo group delay)
         float I_m45, I_p45, Q_m45, Q_p45;
@@ -408,6 +410,10 @@ inline float dsp_process_sample(float i_norm, float q_norm)
           // LSB: I_d - H_Q  → INV_SQRT2 * (I_-45 + I_+45 + Q_-45 - Q_+45)
           a = INV_SQRT2 * (I_m45 + I_p45 + Q_m45 - Q_p45);
         }
+
+        // 🔹 DC-blocker específico para SSB (mata el tono cercano a 0 Hz)
+        s_ssb_dc += SSB_DC_ALPHA * (a - s_ssb_dc);
+        a -= s_ssb_dc;
 
         audio = a;
         break;

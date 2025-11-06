@@ -241,9 +241,16 @@ static Biquad s_filt_ssb_Q_lp;   // LP Q
 
 static Biquad s_filt_cw;
 
+// === Low-pass anti-alias para IQ SOLO en el camino de audio ===
+#define IQ_AA_FC_HZ   3500.0f   // corte aprox 3.5 kHz en Fs_ADC
+#define IQ_AA_Q       0.707f    // butterworth aprox
+
+static Biquad s_iqAA_I;         // LP en rama I (antes de decimar a audio)
+static Biquad s_iqAA_Q;         // LP en rama Q (antes de decimar a audio)
+
 // DC-blocker adicional específico para SSB (para matar el tono cercano a 0 Hz)
-static float s_ssb_dc = 0.05f;//Filtro DC-F-bajas
-#define SSB_DC_ALPHA 0.07f   // rango típico: 0.01–0.05
+static float s_ssb_dc = 0.05f;  // Filtro DC-F-bajas
+#define SSB_DC_ALPHA 0.07f      // más alto = HP más agresivo en SSB
 
 // Post-filtro global + estimador de ruido
 static float s_env_dc      = 0.0f;  // DC del audio (post-filtro)
@@ -255,7 +262,7 @@ static float s_sig_env     = 0.0f;  // envolvente “rápida” de la señal
 // Coeficientes "globales" del post-filtro / denoise
 #define AUDIO_GAIN    1.0f     // Ganancia global de audio (lineal)
 
-// Inicializar filtros de audio según Fs actual
+// Inicializar filtros de audio según Fs actual (Fs AUDIO)
 inline void audio_filters_init(float fs)
 {
   // AM
@@ -282,9 +289,16 @@ inline void audio_filters_init(float fs)
   s_lp_y        = 0.0f;
   s_noise_env   = 0.0f;
   s_sig_env     = 0.0f;
-  s_ssb_dc      = 0.0f;     // 🔹 reset del DC-blocker SSB
+  s_ssb_dc      = 0.0f;     // reset del DC-blocker SSB
 
   hilbert45_init();
+}
+
+// Inicializar LP anti-alias en IQ a Fs del ADC (solo usado en audio)
+inline void iq_antialias_init(float fs_adc)
+{
+  biquad_set_lowpass(s_iqAA_I, fs_adc, IQ_AA_FC_HZ, IQ_AA_Q);
+  biquad_set_lowpass(s_iqAA_Q, fs_adc, IQ_AA_FC_HZ, IQ_AA_Q);
 }
 
 
@@ -398,10 +412,6 @@ inline float dsp_process_sample(float i_norm, float q_norm)
         hilbert45_process(s_hilb_Q45, q_bp, Q_m45, Q_p45);
 
         // 3) combinaciones para USB / LSB
-        // Derivado de: USB = I_d + H_Q, LSB = I_d - H_Q
-        // usando:
-        //   I_-45 = (I_d + H_I)/√2, I_+45 = (I_d - H_I)/√2
-        //   Q_-45 = (Q_d + H_Q)/√2, Q_+45 = (Q_d - H_Q)/√2
         float a;
         if (g_demodMode == DMOD_USB) {
           // USB: I_d + H_Q  → INV_SQRT2 * (I_-45 + I_+45 - Q_-45 + Q_+45)
@@ -411,7 +421,7 @@ inline float dsp_process_sample(float i_norm, float q_norm)
           a = INV_SQRT2 * (I_m45 + I_p45 + Q_m45 - Q_p45);
         }
 
-        // 🔹 DC-blocker específico para SSB (mata el tono cercano a 0 Hz)
+        // 🔹 DC / HP adicional específico para SSB (mata tono y graves cercanos a 0 Hz)
         s_ssb_dc += SSB_DC_ALPHA * (a - s_ssb_dc);
         a -= s_ssb_dc;
 
@@ -530,8 +540,12 @@ inline void i2s_setup()
 {
   i2s_setup_rx();
   i2s_setup_tx();
+
   // Inicializar filtros de audio para Fs FIJA (24 kHz)
   audio_filters_init((float)AUDIO_FS_HZ);
+
+  // Inicializar low-pass anti-alias de IQ a Fs del ADC (solo para audio)
+  iq_antialias_init((float)g_samplingHz);
 }
 
 // ==================== captura IQ (core 1) ====================
@@ -595,6 +609,22 @@ inline void i2s_captureIQ()
 
   double accI = 0.0, accQ = 0.0;
 
+#if AUDIO_PASSTHROUGH
+  // ====== DSP: IQ -> audio (Fs fija) -> DAC ======
+  static int16_t dacBuf[NUM_SAMPLES * 2];
+
+  const float NORM      = 1.0f / 8388608.0f;   // 1 / 2^23
+  const float OUT_SCALE = 32767.0f;
+
+  // Factor de decimación: ADC / AUDIO_FS
+  // (asumimos que g_samplingHz es múltiplo entero de AUDIO_FS_HZ: 24k/48k/96k)
+  int decim = (int)((float)g_samplingHz / (float)AUDIO_FS_HZ);
+  if (decim < 1) decim = 1;
+  if (decim > frames) decim = frames;
+
+  int outIndex = 0;
+#endif
+
   for (int n = 0; n < frames; n++) {
     int32_t w0 = w[n * 2 + 0] >> 8; // 24 bits
     int32_t w1 = w[n * 2 + 1] >> 8;
@@ -608,6 +638,7 @@ inline void i2s_captureIQ()
       sR = w1;
     }
 
+    // === IQ "bruto" para UI / FFT (ancho completo) ===
     double sI, sQ;
 #if SWAP_IQ
     sI = (double)sR;
@@ -622,9 +653,34 @@ inline void i2s_captureIQ()
 
     accI += sI;
     accQ += sQ;
+
+#if AUDIO_PASSTHROUGH
+    // === Camino de audio: IQ filtrado + decimación con anti-alias ===
+    float fI = (float)sI;
+    float fQ = (float)sQ;
+
+    // Low-pass anti-alias en IQ a Fs_ADC
+    float fI_filt = biquad_process(s_iqAA_I, fI);
+    float fQ_filt = biquad_process(s_iqAA_Q, fQ);
+
+    // Decimación: solo generamos audio cada "decim" muestras
+    if ((n % decim) == 0) {
+      float i_norm = fI_filt * NORM;
+      float q_norm = fQ_filt * NORM;
+
+      // El DSP ahora "ve" una Fs ≈ AUDIO_FS_HZ (24 kHz)
+      float a = dsp_process_sample(i_norm, q_norm);  // -1..1
+
+      int16_t s = (int16_t)(a * OUT_SCALE);
+
+      dacBuf[2 * outIndex + 0] = s;   // L
+      dacBuf[2 * outIndex + 1] = s;   // R
+      outIndex++;
+    }
+#endif
   }
 
-  // Quitar DC del frame IQ
+  // Quitar DC del frame IQ (solo para la UI / FFT)
   double meanI = accI / (double)frames;
   double meanQ = accQ / (double)frames;
   for (int n = 0; n < frames; n++) {
@@ -633,37 +689,9 @@ inline void i2s_captureIQ()
   }
 
 #if AUDIO_PASSTHROUGH
-  // ====== DSP: IQ -> audio (Fs fija) -> DAC ======
-  static int16_t dacBuf[NUM_SAMPLES * 2];
-
-  const float NORM      = 1.0f / 8388608.0f;   // 1 / 2^23
-  const float OUT_SCALE = 32767.0f;
-
-  // Factor de decimación: ADC / AUDIO_FS
-  // (asumimos que g_samplingHz es múltiplo entero de AUDIO_FS_HZ: 24k/48k/96k)
-  int decim = (int)( (float)g_samplingHz / (float)AUDIO_FS_HZ );
-  if (decim < 1) decim = 1;
-  if (decim > frames) decim = frames;
-
-  // Cuántas muestras de audio vamos a producir en este bloque
-  const int audioFrames = frames / decim;
-
-  int outIndex = 0;
-  for (int n = 0; n < frames; n += decim) {
-    float i_norm = (float)dstR[n] * NORM;
-    float q_norm = (float)dstI[n] * NORM;
-
-    // El DSP ahora "ve" una Fs = AUDIO_FS_HZ (24 kHz)
-    float a = dsp_process_sample(i_norm, q_norm);  // -1..1
-
-    int16_t s = (int16_t)(a * OUT_SCALE);
-
-    dacBuf[2 * outIndex + 0] = s;   // L
-    dacBuf[2 * outIndex + 1] = s;   // R
-    outIndex++;
-  }
-
-  size_t to_write = (size_t)audioFrames * 2 * sizeof(int16_t);
+  // Escribir al DAC solo lo que realmente generamos
+  size_t audioFrames = (size_t)outIndex;
+  size_t to_write = audioFrames * 2 * sizeof(int16_t);
   uint8_t *bp = (uint8_t*)dacBuf;
   while (to_write > 0) {
     size_t bw = 0;
@@ -681,7 +709,6 @@ inline void i2s_captureIQ()
     bp       += bw;
   }
 #endif
-
 
   // Publicar frame para la UI / FFT
   g_iq_latest_idx  = wr;
